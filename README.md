@@ -12,43 +12,34 @@
 </div>
 
 ## Contents
-- [TODO](#todo)
 - [Install](#install)
 - [PPO-Training](#ppo-training)
 - [Results](#results)
+- [TODO](#todo)
 - [Citation](#citation)
 - [Acknowledgement](#acknowledgement)
 - [License](#license)
 
-## TODO
-
-- [x] Open-source RL training framework
-
-- [ ] The temporal abstraction technique (June)
-
-- [ ] More applications (July)
-
 ## Install
 
 - Resource link: https://drive.google.com/file/d/1IdBEGZJh1r4MOn4vMDOZ3CfKn9YAvOzZ/view?usp=sharing
-- Install MineDojo environment: the official document is: https://docs.minedojo.org/sections/getting_started/install.html#prerequisites. 
+- The official document of MineDojo environment: https://docs.minedojo.org/sections/getting_started/install.html#prerequisites
 
-- Follow my steps:
-	- Create python 3.9 environment in anaconda.
-	- Install jdk version 171, otherwise you may see some error with Malmo. The package is in the resource link. After installation, you can see the version via `java -version`.
-	- Install dependencies `sudo apt install xvfb xserver-xephyr python-opengl ffmpeg`.
-	- pip install minedojo
-	- If successfully installed, you can run `MINEDOJO_HEADLESS=1 python validate_install.py`.
-
-- Modify MineDojo package: 
-	- Delete the official package `pip uninstall minedojo`.
-	- Download our repo https://github.com/PKU-RL/MCEnv. Run `python setup.py install`. 
-	- For different tasks, carefully check our fast_reset option.
-
+- Create python 3.9 environment in anaconda.
+- Install jdk version 171, otherwise you may see some error with Malmo. The package `jdk-8u171-linux-x64.tar.gz` is in the resource link.
+	- sudo tar -xzvf jdk-8u171-linux-x64.tar.gz -C /usr/local
+	- export JAVA_HOME=/usr/local/jdk1.8.0_171
+- Install dependencies
+	- `sudo apt install xvfb xserver-xephyr python-opengl ffmpeg`
+	- Centos: `sudo yum install xorg-x11-server-Xvfb xorg-x11-server-Xephyr ffmpeg`
+- Install OpenGL (Centos)
+	- `sudo yum install mesa*`
+	- `sudo yum install freeglut*`
+- Download our repo https://github.com/PKU-RL/MCEnv. Run `python setup.py install`. 
+- For different tasks, carefully check our fast_reset option.
+- If successfully installed, you can run `MINEDOJO_HEADLESS=1 python validate_install.py`.
 - Install MineCLIP: `pip install git+https://github.com/MineDojo/MineCLIP`, or use the package in the resource link.
-
 - Use PyTorch>=1.8.1. Require x-transformers==0.27.1, otherwise the CLIP model cannot be loaded.
-
 - Check the arguments in train.py.  Download the pretrained MineCLIP model `adjust.pth`  in the resource link.
 
 ## PPO-Training
@@ -78,6 +69,16 @@
 |milk|wool|
 |---|---|
 |<img src="fig/ppo_harvest_milk/1345.gif" width="200" />|<img src="fig/ppo_harvest_wool/1250.gif" width="200" />|
+
+## TODO
+
+- [x] Open-source RL training framework
+
+- [x] Fix the environmental issues of different systems
+
+- [ ] The temporal abstraction technique
+
+- [ ] More applications
 
 ## Citation
 ```
