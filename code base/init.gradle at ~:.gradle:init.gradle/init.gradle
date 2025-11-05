@@ -1,0 +1,47 @@
+println ">>> INIT OK: ~/.gradle/init.gradle is loaded"
+
+/**
+ * com.github.SpongePowered:MixinGradle:dcfaf61  ->  org.spongepowered:mixingradle:0.6-SNAPSHOT
+ * Gradle 4.10.2 호환: dependencySubstitution 대신 eachDependency 사용
+ * buildscript(classpath) + 일반 의존성 모두에 적용
+ */
+
+def spongeRepo = { maven { url 'https://repo.spongepowered.org/repository/maven-public/' } }
+def jitpackRepo = { maven { url 'https://jitpack.io' } }
+
+gradle.beforeProject { Project p ->
+    // 저장소를 "아주 이른 시점"에 주입
+    p.buildscript {
+        repositories {
+            spongeRepo.delegate = owner; spongeRepo()
+            jitpackRepo.delegate = owner; jitpackRepo()
+            mavenLocal()
+            mavenCentral()
+        }
+        // classpath 의존성 치환 (FG 2.x + Gradle 4.10.2 호환)
+        configurations.all { cfg ->
+            resolutionStrategy.eachDependency { details ->
+                if (details.requested.group == 'com.github.SpongePowered' &&
+                    details.requested.name  == 'MixinGradle') {
+                    details.useTarget 'org.spongepowered:mixingradle:0.6-SNAPSHOT'
+                }
+            }
+        }
+    }
+
+    p.repositories {
+        spongeRepo.delegate = owner; spongeRepo()
+        jitpackRepo.delegate = owner; jitpackRepo()
+        mavenLocal()
+        mavenCentral()
+    }
+    // 일반 의존성 치환
+    p.configurations.all { cfg ->
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'com.github.SpongePowered' &&
+                details.requested.name  == 'MixinGradle') {
+                details.useTarget 'org.spongepowered:mixingradle:0.6-SNAPSHOT'
+            }
+        }
+    }
+}

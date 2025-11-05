@@ -22,7 +22,7 @@ def preprocess_obs(obs, device):
     B = 1
 
     def cvt_voxels(vox):
-        ret = np.zeros(3*3*3, dtype=np.long)
+        ret = np.zeros(3*3*3, dtype=np.int64)
         for i, v in enumerate(vox.reshape(3*3*3)):
             if v in VOXEL_BLOCK_NAME_MAP:
                 ret[i] = VOXEL_BLOCK_NAME_MAP[v]
@@ -44,13 +44,13 @@ def preprocess_obs(obs, device):
         "compass": torch.as_tensor([np.concatenate([np.cos(yaw_), np.sin(yaw_), np.cos(pitch_), np.sin(pitch_)])], device=device),
         "gps": torch.as_tensor([obs["location_stats"]["pos"]], device=device),
         "voxels": torch.as_tensor(
-            [cvt_voxels(obs["voxels"]["block_name"])], dtype=torch.long, device=device
+            [cvt_voxels(obs["voxels"]["block_name"])], dtype=torch.int64, device=device
         ),
         "biome_id": torch.tensor(
-            [int(obs["location_stats"]["biome_id"])], dtype=torch.long, device=device
+            [int(obs["location_stats"]["biome_id"])], dtype=torch.int64, device=device
         ),
         "prev_action": torch.tensor(
-            [cvt_action(obs["prev_action"])], dtype=torch.long, device=device
+            [cvt_action(obs["prev_action"])], dtype=torch.int64, device=device
         ),
         "prompt": torch.as_tensor(obs["rgb_emb"], device=device).view(B, 512), 
         # this is actually the image embedding, not prompt embedding (for single task)
@@ -224,13 +224,30 @@ class MinecraftEnv:
         if hasattr(self, 'base_env'):
             self.base_env.close()
         if not self.dense_reward:
-            self.base_env = minedojo.make(task_id=self.task_id, image_size=self.image_size, seed=self.seed, specified_biome=self.biome, **self.kwargs)
+            self.base_env = minedojo.make(
+                task_id=self.task_id, 
+                image_size=self.image_size, 
+                seed=self.seed,
+                specified_biome=self.biome,
+                fast_reset=True,
+                fast_reset_random_teleport_range_low=0,
+                fast_reset_random_teleport_range_high=100,
+                **self.kwargs)
         else:
-            self.base_env = minedojo.make(task_id=self.task_id, image_size=self.image_size, seed=self.seed, specified_biome=self.biome, 
-                use_lidar=True, lidar_rays=[
+            self.base_env = minedojo.make(
+                task_id=self.task_id, 
+                image_size=self.image_size, 
+                seed=self.seed, 
+                specified_biome=self.biome, 
+                use_lidar=True, 
+                lidar_rays=[
                 (np.pi * pitch / 180, np.pi * yaw / 180, 999)
                 for pitch in np.arange(-30, 30, 6)
-                for yaw in np.arange(-60, 60, 10)], **self.kwargs)
+                for yaw in np.arange(-60, 60, 10)], 
+                fast_reset=True,
+                fast_reset_random_teleport_range_low=0,
+                fast_reset_random_teleport_range_high=100,
+                **self.kwargs)
             #self._target_name = target_name
             self._consecutive_distances = deque(maxlen=2)
             self._distance_min = np.inf
@@ -252,7 +269,7 @@ class MinecraftEnv:
 
         if self.clip_model is not None:
             with torch.no_grad():
-                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int)).view(1,1,*self.observation_size)
+                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int64)).view(1,1,*self.observation_size)
                 img_emb = self.clip_model.image_encoder(torch.as_tensor(img,dtype=torch.float).to(self.device))
                 obs['rgb_emb'] = img_emb.cpu().numpy() # (1,1,512)
                 #print(obs['rgb_emb'])
@@ -278,7 +295,7 @@ class MinecraftEnv:
         
         if self.clip_model is not None:
             with torch.no_grad():
-                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int)).view(1,1,*self.observation_size)
+                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int64)).view(1,1,*self.observation_size)
                 img_emb = self.clip_model.image_encoder(torch.as_tensor(img,dtype=torch.float).to(self.device))
                 obs['rgb_emb'] = img_emb.cpu().numpy() # (1,1,512)
                 #print(obs['rgb_emb'])
@@ -315,7 +332,143 @@ class MinecraftEnv:
 
 
 
-import habitat
+# import habitat
+# '''
+# Oct 29
+# env for multi-process
+# 1. the init function receives a single args
+# 2. not contain CLIP model
+# 3. specially: auto reset an env if done, because all the envs are stepped simultaneously
+# '''
+# class MinecraftEnvMP(habitat.RLEnv):
+
+#     # def __init__(self, task_id, image_size=(160, 256), max_step=500, clip_model=None, device=None, seed=0,
+#     #              dense_reward=False, target_name='cow'):
+#     def __init__(self, args):
+#         self.args = args
+#         self.observation_size = (3, *args.image_size)
+#         self.action_size = 8
+#         #self.dense_reward = bool(args.use_dense)
+#         if 'biome' in args:
+#             self._env = minedojo.make(task_id=args.task_id, image_size=args.image_size, seed=args.seed_env, specified_biome=args.biome)
+#         else:
+#             self._env = minedojo.make(task_id=args.task_id, image_size=args.image_size, seed=args.seed_env)
+
+#         self.max_step = args.horizon
+#         self.cur_step = 0
+#         self.task_prompt = self._env.task_prompt
+#         #self.clip_model = None  # use mineclip model to precompute embeddings
+#         #self.device = args.device
+#         self.seed_env = args.seed_env
+#         self.task_id = args.task_id
+#         self.image_size = args.image_size
+#         #self.number_of_episodes = 10000
+#         self._first_reset = True
+#         self._reset_cmds = ["/kill @e[type=!player]",
+#                             "/clear", "/kill @e[type=item]"]
+
+#         self.number_of_episodes = 10000
+
+#     def __del__(self):
+#         if hasattr(self, '_env'):
+#             self._env.close()
+
+#     # auto reset after remake
+#     def remake(self):
+#         '''
+#         call this to reset all the blocks and trees
+#         should modify line 479 in minedojo/tasks/__init__.py, deep copy the task spec dict:
+#             import deepcopy
+#             task_specs = copy.deepcopy(ALL_TASKS_SPECS[task_id])
+#         '''
+#         self._env.close()
+#         if 'biome' in self.args:
+#             self._env = minedojo.make(task_id=self.task_id, image_size=self.image_size, seed=self.seed_env, specified_biome=self.args.biome)
+#         else:
+#             self._env = minedojo.make(task_id=self.task_id, image_size=self.image_size, seed=self.seed_env)
+    
+#         self._first_reset = True
+#         print('Environment remake: reset all the destroyed blocks!')
+#         return self._env.reset()
+
+#     def reset(self):
+#         if not self._first_reset:
+#             for cmd in self._reset_cmds:
+#                 self._env.unwrapped.execute_cmd(cmd)
+#             self._env.unwrapped.set_time(6000)
+#             self._env.unwrapped.set_weather("clear")
+#         self._first_reset = False
+#         self.prev_action = self._env.action_space.no_op()
+
+#         obs = self._env.reset()
+#         self.cur_step = 0
+
+#         obs['prev_action'] = self.prev_action
+
+#         return obs
+
+#     def step(self, act):
+#         #print(act)
+#         obs, reward, done, info = self._env.step(act['action'])
+#         self.cur_step += 1
+#         if self.cur_step >= self.max_step:
+#             done = True
+
+#         obs['prev_action'] = self.prev_action
+#         self.prev_action = np.asarray(act['action'])  # save the previous action for the agent's observation
+
+#         return obs, reward, done, info
+
+
+# if __name__ == '__main__':
+#     #print(minedojo.ALL_TASKS_SPECS)
+#     env = MinecraftEnv(
+#         task_id="harvest_milk_with_empty_bucket_and_cow",
+#         image_size=(160, 256),
+#     )
+#     reset_cmds = ["/kill @e[type=!player]", "/clear", "/kill @e[type=item]"]
+#     obs = env.reset()
+#     #print(obs.shape, obs.dtype)
+#     for t in range (100):
+#         for i in range(12):
+#             act = [42,0] #cam
+#             obs, reward, done, info = env.step(act)
+#             time.sleep(0.2)
+#         print('reset')
+#         for cmd in reset_cmds:
+#             env.base_env.execute_cmd(cmd)
+#         obs = env.reset()
+# '''
+
+# #print(env.base_env.task_prompt, env.base_env.task_guidance)
+# obs = env.reset()
+# print(obs.shape, obs.dtype)
+# for t in range (1000):
+
+#     #act = env.base_env.action_space.no_op()
+    
+#     if t < 50:
+#         act = [1,0]   # forward
+#     elif t < 200:
+#         act = [0,0]    # stall
+#     elif t < 400:
+#         act = [1,2] # attack
+#     elif t<600:
+#         act = [50,1] #cam
+#     elif t<800:
+#         act = [40,1]
+#     else:
+#         act = [1,0]
+    
+#     obs, reward, done, info = env.step(act)
+#     print(act, reward)
+
+#     #print(reward, done, info)
+
+# '''
+
+
+import gym
 '''
 Oct 29
 env for multi-process
@@ -323,7 +476,7 @@ env for multi-process
 2. not contain CLIP model
 3. specially: auto reset an env if done, because all the envs are stepped simultaneously
 '''
-class MinecraftEnvMP(habitat.RLEnv):
+class MinecraftEnvMP(gym.Env):
 
     # def __init__(self, task_id, image_size=(160, 256), max_step=500, clip_model=None, device=None, seed=0,
     #              dense_reward=False, target_name='cow'):

@@ -20,6 +20,8 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=1000) # PPO epoch number
     parser.add_argument('--save-path', type=str, default='checkpoint') # save dir for model&data. Use /sharefs/baaiembodied/xxx on server
     parser.add_argument('--exp-name', type=str, default='ppo') # experiment log name
+    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--ckpt-path', type=str, default='')
     
 
     # arguments for tasks
@@ -67,10 +69,12 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     #print(args)
-
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
-    args.save_path = os.path.join(args.save_path, '{}-{}-seed{}'.format(args.exp_name, args.task, args.seed))
+
+    import datetime
+    timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    args.save_path = os.path.join(args.save_path, '{}-{}-seed{}-{}'.format(args.exp_name, args.task, args.seed, timestamp))
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
 

@@ -1,3 +1,4 @@
+import argparse
 import utils
 import os
 import sys
@@ -9,6 +10,7 @@ import numpy as np
 import random
 #from spinup_utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
 #from spinup_utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads
+from spinup_utils.run_utils import setup_logger_kwargs
 from spinup_utils.logx import EpochLogger
 from PIL import Image
 import imageio
@@ -16,11 +18,13 @@ import imageio
 #from torchvision.transforms import Resize 
 #from skimage.transform import resize
 from mineclip_official import build_pretrain_model, tokenize_batch, torch_normalize
-from minecraft import MinecraftEnv, preprocess_obs, transform_action
+#from minecraft import MinecraftEnv, preprocess_obs, transform_action
+from envs.minecraft_nav import MinecraftNavEnv, preprocess_obs, transform_action
 from mineagent.batch import Batch
 from mineagent import features, SimpleFeatureFusion, MineAgent, MultiCategoricalActor, Critic
 import copy
 import pickle
+import matplotlib.pyplot as plt
 
 
 # PPO buffer
@@ -39,8 +43,7 @@ class PPOBuffer:
             self.obs_buf = [Batch() for i in range(size)]#np.zeros(utils.combined_shape(size, obs_dim), dtype=np.float32)
         else:
             self.obs_buf = np.zeros(utils.combined_shape(size, obs_dim), dtype=np.float32)
-        # self.act_buf = np.zeros(utils.combined_shape(size, act_dim), dtype=np.int)
-        self.act_buf = np.zeros(utils.combined_shape(size, act_dim), dtype=np.int64)
+        self.act_buf = np.zeros(utils.combined_shape(size, act_dim), dtype=np.int)
         #self.act2_buf = np.zeros(utils.combined_shape(size, act2_dim), dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
@@ -124,178 +127,11 @@ class PPOBuffer:
         return rtn
 
 
-# self-imitation learning buffer
-# for CNN actor: observation should be processed by torch_normalize before save
-class SelfImitationBuffer:
-    def __init__(self, act_dim, size=500, imitate_success_only=True, agent_model='mineagent'):
-        '''
-        each saved item is a trajectory: act_buf [[len, act_dim], ...]
-        '''
-        self.obs_buf = []
-        self.act_buf = [] # np.zeros(utils.combined_shape(size, act_dim), dtype=np.int)
-        self.ret_buf = [] # returns
-        self.success_buf = []
-        self.cur_size, self.max_size = 0, size
-        self.baseline = 0.
-        self.success_rate = 0.
-        self.avg_return = 0.
-        self.imitate_success_only = imitate_success_only
-
-        #self.rgb_buf = []
-        self.i_saved_traj = 0
-        self.agent_model = agent_model
-
-    # eval the trajectory performance and decide to store
-    def eval_and_store(self, obs, act, ret, success, rgb=None, save_dir=None):
-        '''
-        store if success or episode return >= baseline
-        if the buffer is full, first-in-first-out
-        '''
-        if self.cur_size > 0:
-            self.baseline = np.mean(self.ret_buf) + 2*np.std(self.ret_buf)
-        if success or ((not self.imitate_success_only) and (ret >= self.baseline)):
-            assert self.cur_size <= self.max_size
-            self.obs_buf.append(obs)
-            self.act_buf.append(act)
-            self.ret_buf.append(ret)
-            self.success_buf.append(success)
-            self.success_rate = np.mean(self.success_buf)
-            self.avg_return = np.mean(self.ret_buf)
-            #self.rgb_buf.append(rgb)
-
-            if self.cur_size < self.max_size:
-                self.cur_size += 1
-            else: # FIFO
-                del(self.obs_buf[0])
-                del(self.act_buf[0])
-                del(self.ret_buf[0])
-                del(self.success_buf[0])
-                #del(self.rgb_buf[0])
-
-            # save the expert trajectory
-            if save_dir is not None:
-                if not os.path.exists(save_dir):
-                    os.mkdir(save_dir)
-                pth = os.path.join(save_dir, 'traj_{}.pth'.format(self.i_saved_traj))
-                pickle.dump([obs, act, ret, success, rgb], open(pth, 'wb'))
-                self.i_saved_traj += 1
-
-
-        #print(self.cur_size, len(self.obs_buf), self.baseline, self.success_rate,
-        #    obs.shape, act.shape, ret)
-
-    # get all the data for training. 
-    # convert the trajectory list [N * [len, dim]] to transition array [N', dim]
-    def get(self):
-        assert self.cur_size > 0
-        act_ = np.concatenate(self.act_buf)
-        if self.agent_model == 'mineagent':
-            obs_ = Batch.cat(self.obs_buf)
-            rtn = {
-                'act': torch.as_tensor(act_, dtype=torch.int64),
-                'obs': obs_
-            }
-        else:
-            obs_ = np.concatenate(self.obs_buf)
-            rtn = {
-                'act': torch.as_tensor(act_, dtype=torch.int64),
-                'obs': torch.as_tensor(obs_, dtype=torch.float32)
-            }
-        
-        return rtn
-
-
-# 10/9 update:
-# maintain the text embedding 
-# compute images embedding (with 15 empty frames at begin) for a trajectory 
-# compute constrastive intrinsic rewards for all the steps with a moving window
-class CLIPReward:
-    def __init__(self, clip_model, device, text):
-        self.clip_model = clip_model
-        self.device = device
-        self.text = text
-
-        # load negative prompts
-        with open('negative_prompts.txt', 'r') as f:
-            self.neg_text = f.read().splitlines()
-        #print(self.text, self.neg_text)
-        
-        # create initial 15 empty frames before env reset
-        #video = torch_normalize(np.zeros([1, 15, 3, 160, 256])).to(self.device)
-        with torch.no_grad():
-            #self.imgs_emb = self.clip_model.image_encoder(torch.as_tensor(video, dtype=torch.float))
-            # pre-compute text embedding
-            self.text_emb = self.clip_model.text_encoder(tokenize_batch(self.text + self.neg_text).to(self.device))
-            #print(tokenize_batch(self.text + self.neg_text), self.text_emb)
-            assert self.text_emb.shape[0] == 1+len(self.neg_text)
-
-    '''
-    # update the images queue when calling env.reset() or step()
-    # the encoding for the new image is pre-computed in the env wrapper
-    def update_obs(self,emb):
-        assert emb.shape[0] == 1 and emb.shape[1] == 1 # (1,1,512)
-        self.imgs_emb = torch.cat((self.imgs_emb[:,1:], torch.as_tensor(emb, device=self.device)), 1)
-    '''
-
-    # compute all the embeddings for a trajectory, concat the 15 empty frames at beginning
-    # input imgs should be preprocessed by torch_normalize
-    def compute_all_embeddings(self, imgs):
-        #assert imgs.dtype is np.int
-        video_begin = torch_normalize(np.zeros([1, 15, 3, 160, 256])).to(self.device) # pad 15 frames before reset
-        video = imgs.to(self.device) # (1, N, 3, 160, 256)
-        video = torch.cat((video_begin, video), 1) # (1, 15+N, 3, 160, 256)
-        #print(video.shape)
-
-        with torch.no_grad():
-            self.imgs_emb = self.clip_model.image_encoder(torch.as_tensor(video, dtype=torch.float)) # (1, 15+N, 512)
-            #print(self.imgs_emb.shape)
-
-
-    # compute the intrinsic reward for a 16-frames window
-    # mode: direct, direct-naive and delta in minedojo paper
-    def reward(self, imgs_emb_window, mode='direct'):
-        with torch.no_grad():
-            v_emb = self.clip_model.temporal_encoder(imgs_emb_window)
-            adapted_video, adapted_text = self.clip_model.reward_adapter(v_emb, self.text_emb)
-            v_f = adapted_video / adapted_video.norm(dim=1, keepdim=True) # (1, 512)
-            v_f = self.clip_model.logit_scale.exp()*v_f
-            t_f= adapted_text / adapted_text.norm(dim=1, keepdim=True) # (1, 512)
-            #print(v_f.shape, t_f.shape)
-            logits_per_video = v_f @ t_f.t() # (1,32)
-            prob = F.softmax(logits_per_video, dim=-1)[0][0].detach().cpu().numpy() # P(video corresponds to the prompt)
-            
-        if mode=='direct':
-            assert self.text_emb.shape[0] == 32
-            r_clip = max(prob - 1./32, 0)
-        else:
-            raise NotImplementedError
-        return r_clip
-
-    # compute reward sequence for a trajectory, after calling compute_all_embeddings
-    def compute_all_rewards(self, mode='direct'):
-        r = []
-        for i in range(self.imgs_emb.shape[1]-16):
-            r.append(self.reward(self.imgs_emb[:, i+1:i+17], mode=mode)) # skip the reset step
-        return np.array(r)
-
-    '''
-    # reset the queue when env.reset
-    def reset(self):
-        video = torch_normalize(np.zeros([1, 16, 3, 160, 256])).to(self.device)
-        with torch.no_grad():
-            self.imgs_emb = self.clip_model.image_encoder(torch.as_tensor(video, dtype=torch.float))
-    '''
-
-
 
 '''
-PPO algorithm implementation:
-for every epoch, first play the game to collect trajectories
-until the buffer is full, then update the actor and the critic for sevaral steps using the buffer.
-
-ppo_clip uses mineclip intrinsic reward for sparse reward tasks.
+PPO training for goal-based navigation policy
 '''
-def ppo_selfimitate_clip(args, seed=0, device=None, 
+def ppo_navigation(args, seed=0, device=None, 
         steps_per_epoch=400, epochs=500, gamma=0.99, clip_ratio=0.2, pi_lr=1e-4, vf_lr=1e-4,  
         train_pi_iters=80, train_v_iters=80, lam=0.95, max_ep_len=1000,
         target_kl=0.01, save_freq=5, logger_kwargs=dict(), save_path='checkpoint', 
@@ -437,19 +273,18 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
 
 
     # Instantiate environment
-    env = MinecraftEnv(
-        task_id=args.task,
+    env = MinecraftNavEnv(
         image_size=(160, 256),
-        max_step=args.horizon, 
         clip_model=model_clip if (args.agent_model == 'mineagent') else None, 
         device=device,
         seed=seed,
-        dense_reward=bool(args.use_dense)
+        biome='plains'
     )
     obs_dim = env.observation_size
     env_act_dim = env.action_size
     agent_act_dim = len(args.actor_out_dim)
-    print('Task prompt:', env.task_prompt)
+    print('Navigation env created.')
+    #print('Task prompt:', env.task_prompt)
     #logger.log('env: obs {}, act {}'.format(env.observation_space, env.action_space))
 
 
@@ -470,7 +305,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         feature_net_v = copy.deepcopy(feature_net) # actor and critic do not share
         actor = MultiCategoricalActor(
             feature_net,
-            action_dim=args.actor_out_dim, #[3, 3, 4, 25, 25, 8],
+            action_dim=args.actor_out_dim, #[12,3]
             device=device,
             **agent_config['actor'],
             activation='tanh',
@@ -488,12 +323,6 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
             deterministic_eval=False
         ).to(device) # use the same stochastic policy in training and test
         mine_agent.eval()
-    elif args.agent_model == 'cnn':
-        mine_agent = utils.CNNActorCritic(
-            action_dim=args.actor_out_dim,
-            deterministic_eval=False
-        ).to(device)
-        mine_agent.eval()
     else:
         raise NotImplementedError
 
@@ -509,10 +338,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
     # Set up experience buffer
     local_steps_per_epoch = steps_per_epoch
     buf = PPOBuffer(agent_act_dim, local_steps_per_epoch, gamma, lam, args.agent_model, obs_dim)
-
-    # set up imitation buffer
-    imitation_buf = SelfImitationBuffer(agent_act_dim, args.imitate_buf_size, args.imitate_success_only, args.agent_model)
-    
+ 
 
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
@@ -598,77 +424,15 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                      DeltaLossPi=(loss_pi.item() - pi_l_old),
                      DeltaLossV=(loss_v.item() - v_l_old))
 
-
-
-    # set up function for computing self-imitation loss
-    # use the batch indexed by idxs in data
-    def compute_loss_imitation(data, idxs):
-        obs, act = data['obs'][idxs], data['act'][idxs].to(device)
-        if args.agent_model == 'mineagent':
-            obs.to_torch(device=device)
-        else:
-            obs = obs.to(device)
-        pi = mine_agent(obs).dist
-        loss_imitation = pi.imitation_loss(act)
-        return loss_imitation
-
-    # training step for self-imitation learning
-    def update_imitation():
-        mine_agent.train()
-        data = imitation_buf.get()
-        n_data = data['act'].shape[0]
-        n_iter = max(int(n_data / args.imitate_batch_size), 1) # iterations to train for 1 epoch
-        #print('data', data, n_iter, n_data)
-        for i in range(n_iter):
-            pi_optimizer.zero_grad()
-            idxs = np.random.randint(0, n_data, size=args.imitate_batch_size)
-            #print('training batch', data['act'][idxs], data['obs'][idxs])
-            loss_imitation = compute_loss_imitation(data, idxs)
-            loss_imitation.backward()
-            pi_optimizer.step()
-        logger.store(LossImitation=loss_imitation.item(), NumItersImitation=n_iter)
-
-
     
     start_time = time.time()
     saved_traj_cnt = 0 # counter for the saved experience
 
     # initialize the clip reward model
-    clip_reward_model = CLIPReward(model_clip, device, [env.task_prompt])
-
+    #clip_reward_model = CLIPReward(model_clip, device, [env.task_prompt])
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
-
-        '''
-        # save a video of test
-        def test_video():
-            pth = os.path.join(save_path, '{}.gif'.format(epoch))
-            #if not os.path.exists(pth):
-            #    os.mkdir(pth)
-            mine_agent.eval() # in eval mode, the actor is also stochastic now
-            obs = env.reset()
-            gameover = False
-            #i = 0
-            img_list = []
-            while True:
-                img_list.append(np.transpose(obs['rgb'], [1,2,0]).astype(np.uint8))
-                if gameover:
-                    break
-                if args.agent_model == 'mineagent':
-                    batch = preprocess_obs(obs, device)
-                else:
-                    batch = torch_normalize(np.asarray(obs['rgb'], dtype=np.int)).view(1,*obs_dim)
-                    batch = torch.as_tensor(batch, dtype=torch.float32).to(device)
-                with torch.no_grad():
-                    act = mine_agent(batch).act
-                act = transform_action(act)
-                obs, r, gameover, _ = env.step(act)
-                #i += 1
-            imageio.mimsave(pth, img_list, duration=0.1)
-            #env.reset()
-            #mine_agent.train()
-        '''
         
         # Save model and test
         if (epoch % save_freq == 0) or (epoch == epochs-1):
@@ -680,11 +444,12 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
 
         logger.log('start epoch {}'.format(epoch))
         o, ep_ret, ep_len = env.reset(), 0, 0 # Prepare for interaction with environment
+        env.set_goal(pos=o['location_stats']['pos'])
         #clip_reward_model.update_obs(o['rgb_emb']) # preprocess the images embedding
         ep_rewards = []
-        ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int64)).view(1,1,*env.observation_size)
-        ep_ret_clip, ep_success, ep_ret_dense = 0, 0, 0
-        rgb_list = []
+        ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)
+        ep_ret_yaw, ep_ret_dis, ep_ret_pitch = 0, 0, 0
+        rgb_list, pos_list = [], []
         episode_in_epoch_cnt = 0 # episode id in this epoch
 
         
@@ -693,12 +458,16 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         for t in range(local_steps_per_epoch):
             if args.save_raw_rgb:
                 rgb_list.append(np.asarray(o['rgb'], dtype=np.uint8))
+            pos_list.append([o['location_stats']['pos'][0], o['location_stats']['pos'][2]])
 
+            env.add_goal_to_obs(o)
             if args.agent_model == 'mineagent':
                 batch_o = preprocess_obs(o, device)
             else:
-                batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int64)).view(1,*obs_dim)
-                batch_o = torch.as_tensor(batch_o, dtype=torch.float32).to(device)
+                #batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,*obs_dim)
+                #batch_o = torch.as_tensor(batch_o, dtype=torch.float32).to(device)
+                raise NotImplementedError
+            #print(batch_o)
 
             with torch.no_grad():
                 batch_act = mine_agent.forward_actor_critic(batch_o)
@@ -709,29 +478,27 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
 
             a_env = transform_action(a)
             next_o, r, d, _ = env.step(a_env)
-            success = r
+            #success = r
 
             # update the recent 16 frames, compute intrinsic reward
             #clip_reward_model.update_obs(next_o['rgb_emb'])
             #r_clip = clip_reward_model.reward(mode=args.clip_reward_mode)
 
-            r = r * args.reward_success + args.reward_step # + r_clip * args.reward_clip # weighted sum of different rewards
+            #r = r * args.reward_success + args.reward_step # + r_clip * args.reward_clip # weighted sum of different rewards
             ep_rewards.append(r)
             ep_obs = torch.cat((ep_obs, 
-                torch_normalize(np.asarray(next_o['rgb'], dtype=np.int64)).view(1,1,*env.observation_size)), 1)
+                torch_normalize(np.asarray(next_o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)), 1)
 
-            # dense reward
-            if args.use_dense:
-                r_dense = next_o['dense_reward']
-                r += r_dense * args.reward_dense
-                ep_ret_dense += r_dense
-
-            ep_success += success
-            if ep_success > 1:
-                ep_success = 1
+            #ep_success += success
+            #if ep_success > 1:
+            #    ep_success = 1
             #ep_ret_clip += r_clip
             ep_ret += r
+            ep_ret_yaw += next_o['reward_yaw']
+            ep_ret_dis += next_o['reward_dis']
+            ep_ret_pitch += next_o['reward_pitch']
             ep_len += 1
+            #print(next_o['reward_dis'], next_o['location_stats']['pos'], env.init_pos, env.goal_pos)
 
             # save and log
             if args.agent_model == 'mineagent':
@@ -749,16 +516,6 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
             epoch_ended = t==local_steps_per_epoch-1
 
             if terminal or epoch_ended:
-                # compute CLIP embeddings and rewards for each step.
-                # modify the trajectory rewards in the buffer
-                clip_reward_model.compute_all_embeddings(ep_obs)
-                ep_rewards_clip = clip_reward_model.compute_all_rewards()
-                #print(len(ep_rewards_clip), len(ep_rewards), ep_obs.shape)
-                ep_rewards = np.asarray(ep_rewards) + args.reward_clip * ep_rewards_clip
-                ep_ret_clip = np.sum(ep_rewards_clip)
-                ep_ret += ep_ret_clip
-                buf.modify_trajectory_rewards(ep_rewards)
-
                 # check and add to imitation buffer if the trajectory ends
                 if terminal:
                     if args.agent_model == 'mineagent':
@@ -770,8 +527,8 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                         rgb_list.append(np.asarray(o['rgb'], dtype=np.uint8))
                     rgb_list = np.asarray(rgb_list)
                     #print(rgb_list.shape)
-                    expert_save_dir = os.path.join(args.save_path, 'expert_buffer') if args.save_expert_data else None
-                    imitation_buf.eval_and_store(obs_, act_, ep_ret_clip, int(ep_success), rgb_list, expert_save_dir)
+                    #expert_save_dir = os.path.join(args.save_path, 'expert_buffer') if args.save_expert_data else None
+                    #imitation_buf.eval_and_store(obs_, act_, ep_ret_clip, int(ep_success), rgb_list, expert_save_dir)
 
                     # save the experience
                     if args.save_all_data:
@@ -780,19 +537,30 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                         saved_traj_cnt += 1
 
                     # save the gif
-                    if args.save_raw_rgb and ((epoch % save_freq == 0) or (epoch == epochs-1)) and episode_in_epoch_cnt==0:
-                        pth = os.path.join(args.save_path, 'gif', '{}_ret{}_success{}.gif'.format(epoch, int(ep_ret), int(ep_success)))
+                    if args.save_raw_rgb and ((epoch % save_freq == 0) or (epoch == epochs-1)) and (episode_in_epoch_cnt%10==0):
+                        pth = os.path.join(args.save_path, 'gif', '{}_{}_ret{}.gif'.format(epoch, episode_in_epoch_cnt, ep_ret))
                         imageio.mimsave(pth, [np.transpose(i_, [1,2,0]) for i_ in rgb_list], duration=0.1)
+                    # save visualized paths
+                    if ((epoch % save_freq == 0) or (epoch == epochs-1)) and (episode_in_epoch_cnt%10==0):
+                        plt.plot([a[0] for a in pos_list], [a[1] for a in pos_list], 'o', c='b')
+                        #for i_ in range(len(pos_list)-1):
+                        #    plt.quiver(pos_list[i_][0], pos_list[i_][1], pos_list[i_+1][0]-pos_list[i_][0], pos_list[i_+1][1]-pos_list[i_][1], angles='xy', scale=1, scale_units='xy')
+                        plt.quiver(pos_list[0][0], pos_list[0][1], pos_list[-1][0]-pos_list[0][0], pos_list[-1][1]-pos_list[0][1], angles='xy', scale=1, scale_units='xy')
+                        plt.plot(env.goal_pos[0], env.goal_pos[1], 'o', c='r')
+                        pth = os.path.join(args.save_path, 'gif', '{}_{}_ret{}.png'.format(epoch, episode_in_epoch_cnt, ep_ret))
+                        plt.savefig(pth)
+                        plt.cla()
 
 
                 if epoch_ended and not(terminal):
                     print('Warning: trajectory cut off by epoch at %d steps.'%ep_len, flush=True)
                 # if trajectory didn't reach terminal state, bootstrap value target
                 if timeout or epoch_ended:
+                    env.add_goal_to_obs(o)
                     if args.agent_model == 'mineagent':
                         batch_o = preprocess_obs(o, device)
                     else:
-                        batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int64)).view(1,*obs_dim)
+                        batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,*obs_dim)
                         batch_o = torch.as_tensor(batch_o, dtype=torch.float32).to(device)
                     with torch.no_grad():
                         v = mine_agent.forward_actor_critic(batch_o).val
@@ -802,16 +570,17 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                 buf.finish_path(v)
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
-                    logger.store(EpRet=ep_ret, EpLen=ep_len, EpRetClip=ep_ret_clip, EpSuccess=ep_success, 
-                        EpRetDense=ep_ret_dense)
+                    logger.store(EpRet=ep_ret, EpLen=ep_len, EpRetYaw=ep_ret_yaw, EpRetDis=ep_ret_dis, EpRetPitch=ep_ret_pitch)
 
-                o, ep_ret, ep_len = env.reset(), 0, 0
-                ep_ret_clip, ep_success, ep_ret_dense = 0, 0, 0
+                env.reset(reset_env=False) # in an epoch,  not reset the agent, change the goal only.
+                env.set_goal(pos=o['location_stats']['pos'])
+                ep_ret, ep_len = 0, 0
+                ep_ret_yaw, ep_ret_dis, ep_ret_pitch = 0, 0, 0
                 ep_rewards = []
-                ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int64)).view(1,1,*env.observation_size)
+                ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)
                 #clip_reward_model.reset() # don't forget to reset the clip images buffer
                 #clip_reward_model.update_obs(o['rgb_emb']) # preprocess the images embedding
-                rgb_list = []
+                rgb_list, pos_list = [], []
                 episode_in_epoch_cnt += 1
 
 
@@ -819,36 +588,13 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         update()
         episode_in_epoch_cnt = 0
 
-        # Perform self-imitation
-        if imitation_buf.cur_size >= 1 and (epoch % args.imitate_freq == 0) and epoch > 0:
-            for i_imitate in range(args.imitate_epoch):
-                update_imitation()
-            logger.store(ImitationBufferSuccess=imitation_buf.success_rate,
-                ImitationBufferReturn=imitation_buf.avg_return,
-                ImitationBufferAcceptReturn=imitation_buf.baseline,
-                ImitationBufferNumTraj=imitation_buf.cur_size)
-            # Log info about imitation
-            logger.log_tabular('LossImitation', average_only=True)
-            logger.log_tabular('NumItersImitation', average_only=True)
-            logger.log_tabular('ImitationBufferSuccess', average_only=True)
-            logger.log_tabular('ImitationBufferReturn', average_only=True)
-            logger.log_tabular('ImitationBufferAcceptReturn', average_only=True)
-            logger.log_tabular('ImitationBufferNumTraj', average_only=True)
-        elif epoch == 0:
-            logger.log_tabular('LossImitation', 0)
-            logger.log_tabular('NumItersImitation', 0)
-            logger.log_tabular('ImitationBufferSuccess', 0)
-            logger.log_tabular('ImitationBufferReturn', 0)
-            logger.log_tabular('ImitationBufferAcceptReturn', 0)
-            logger.log_tabular('ImitationBufferNumTraj', 0)
-
-
         # Log info about epoch
         logger.log_tabular('Epoch', epoch)
         logger.log_tabular('EpRet', with_min_and_max=True)
-        logger.log_tabular('EpRetClip', with_min_and_max=True)
-        logger.log_tabular('EpSuccess', with_min_and_max=True)
-        logger.log_tabular('EpRetDense', with_min_and_max=True)
+        logger.log_tabular('EpRetYaw', with_min_and_max=True)
+        logger.log_tabular('EpRetPitch', with_min_and_max=True)
+        logger.log_tabular('EpRetDis', with_min_and_max=True)
+        #logger.log_tabular('EpSuccess', with_min_and_max=True)
         logger.log_tabular('EpLen', with_min_and_max=True)
         logger.log_tabular('VVals', with_min_and_max=True)
         logger.log_tabular('TotalEnvInteracts', (epoch+1)*steps_per_epoch)
@@ -869,4 +615,72 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
             # save the imitation learning buffer
             #pth = os.path.join(save_path, 'buffer_{}.pth'.format(epoch))
             #pickle.dump(imitation_buf, open(pth, 'wb'))
-        
+
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+
+    # basic arguments for PPO
+    parser.add_argument('--gamma', type=float, default=0.99) # discount
+    parser.add_argument('--target-kl', type=float, default=0.5) # kl upper bound for updating policy
+    parser.add_argument('--seed', '-s', type=int, default=7) # random seed for both np, torch and env
+    parser.add_argument('--cpu', type=int, default=1) # number of workers
+    parser.add_argument('--gpu', default='0') # -1 if use cpu, otherwise select the gpu id
+    parser.add_argument('--steps', type=int, default=1000) # sample steps per PPO epoch (buffer size * workers)
+    parser.add_argument('--epochs', type=int, default=1000) # PPO epoch number
+    parser.add_argument('--save-path', type=str, default='checkpoint') # save dir for model&data. Use /sharefs/baaiembodied/xxx on server
+    parser.add_argument('--exp-name', type=str, default='ppo-nav') # experiment log name
+
+    # CLIP model and agent model config
+    parser.add_argument('--clip-config-path', type=str, default='mineclip_official/config.yml')
+    parser.add_argument('--clip-model-path', type=str, default='mineclip_official/adjust.pth')
+    parser.add_argument('--agent-model', type=str, default='mineagent') # agent architecture: mineagent, cnn
+    parser.add_argument('--agent-config-path', type=str, default='mineagent/conf_goal_based_agent.yaml') # for mineagent
+    parser.add_argument('--actor-out-dim', type=int, nargs='+', default=[12,3])
+    ''' 
+    actor output dimensions. mineagent official: [3,3,4,25,25,8]; my initial implement: [56,3]
+    mineagent with clipped camera space: [3,3,4,5,3] or [12,3]
+    should modify transform_action() in minecraft.py together with this arg
+    '''
+    
+    # arguments for related research works
+    parser.add_argument('--save-all-data', type=int, default=0) # save all the collected experience
+    parser.add_argument('--save-expert-data', type=int, default=0) # save experience in self-imitation buffer
+    parser.add_argument('--save-raw-rgb', type=int, default=1) # save rgb images when save the above data; save gif for debug
+
+    args = parser.parse_args()
+    #print(args)
+
+    if not os.path.exists(args.save_path):
+        os.mkdir(args.save_path)
+    args.save_path = os.path.join(args.save_path, '{}-seed{}'.format(args.exp_name, args.seed))
+    if not os.path.exists(args.save_path):
+        os.mkdir(args.save_path)
+
+    pth = os.path.join(args.save_path, 'gif')
+    if not os.path.exists(pth):
+        os.mkdir(pth)
+    pth = os.path.join(args.save_path, 'model')
+    if not os.path.exists(pth):
+        os.mkdir(pth)
+    pth = os.path.join(args.save_path, 'experience_buffer')
+    if not os.path.exists(pth):
+        os.mkdir(pth)
+
+    #mpi_fork(args.cpu)  # run parallel code with mpi
+    logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
+
+    # set gpu device
+    if args.gpu == '-1':
+        device = torch.device('cpu')
+    else:
+        device = torch.device('cuda:{}'.format(args.gpu))
+    print('Using device:', device)
+
+    ppo_navigation(args,
+        gamma=args.gamma, save_path=args.save_path, target_kl=args.target_kl,
+        seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
+        logger_kwargs=logger_kwargs, device=device, 
+        clip_config_path=args.clip_config_path, clip_model_path=args.clip_model_path,
+        agent_config_path=args.agent_config_path)
