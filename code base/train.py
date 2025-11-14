@@ -10,26 +10,26 @@ import torch
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    # basic arguments for PPO
+    # basic arguments
     parser.add_argument('--gamma', type=float, default=0.99) # discount
     parser.add_argument('--target-kl', type=float, default=0.5) # kl upper bound for updating policy
     parser.add_argument('--seed', '-s', type=int, default=7) # random seed for both np, torch and env
     parser.add_argument('--cpu', type=int, default=1) # number of workers, should be 1
     parser.add_argument('--gpu', default='0') # -1 if use cpu, otherwise select the gpu id
     parser.add_argument('--steps', type=int, default=1000) # sample steps per PPO epoch (buffer size * workers)
-    parser.add_argument('--epochs', type=int, default=1000) # PPO epoch number
+    parser.add_argument('--epochs', type=int, default=500) # PPO epoch number
     parser.add_argument('--save-path', type=str, default='checkpoint') # save dir for model&data. Use /sharefs/baaiembodied/xxx on server
-    parser.add_argument('--exp-name', type=str, default='ppo') # experiment log name
-    parser.add_argument('--resume', action='store_true')
-    parser.add_argument('--ckpt-path', type=str, default='')
-    
+
+    # GRPO Change: Default experiment name changed from 'ppo' to 'grpo'
+    parser.add_argument('--exp-name', type=str, default='grpo') # experiment log name
+
 
     # arguments for tasks
     parser.add_argument('--task', type=str, default='harvest_milk_with_empty_bucket_and_cow') # programmatic task_id, for single task
     parser.add_argument('--horizon', type=int, default=200) # task horizon. It is 500 in the MineCLIP released code
     parser.add_argument('--use-multi-task', type=int, default=0) # run different tasks across workers
     parser.add_argument('--tasks-config-path', type=str, default='multi_env_config/harvest_milk.yaml') # path to load multi-task configs
-    
+
 
     # CLIP model and agent model config
     parser.add_argument('--clip-config-path', type=str, default='mineclip_official/config.yml')
@@ -37,7 +37,7 @@ if __name__ == '__main__':
     parser.add_argument('--agent-model', type=str, default='mineagent') # agent architecture: mineagent, cnn
     parser.add_argument('--agent-config-path', type=str, default='mineagent/conf.yaml') # for mineagent
     parser.add_argument('--actor-out-dim', type=int, nargs='+', default=[12,3])
-    ''' 
+    '''
     actor output dimensions. mineagent official: [3,3,4,25,25,8]; my initial implement: [56,3]
     mineagent with clipped camera space: [3,3,4,5,3] or [12,3]
     should modify transform_action() in minecraft.py together with this arg
@@ -57,7 +57,7 @@ if __name__ == '__main__':
     parser.add_argument('--imitate-freq', type=int, default=100) # how many ppo epochs to run self-imitation
     parser.add_argument('--imitate-epoch', type=int, default=1) # how many self-imitation epochs
     parser.add_argument('--imitate-success-only', type=int, default=0) # save only success trajs into imitation buffer
-    
+
     # arguments for related research works
     parser.add_argument('--save-all-data', type=int, default=0) # save all the collected experience
     parser.add_argument('--save-expert-data', type=int, default=0) # save experience in self-imitation buffer
@@ -69,12 +69,10 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     #print(args)
+
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
-
-    import datetime
-    timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    args.save_path = os.path.join(args.save_path, '{}-{}-seed{}-{}'.format(args.exp_name, args.task, args.seed, timestamp))
+    args.save_path = os.path.join(args.save_path, '{}-{}-seed{}'.format(args.exp_name, args.task, args.seed))
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
 
@@ -99,11 +97,14 @@ if __name__ == '__main__':
         device = torch.device('cuda:{}'.format(args.gpu))
     print('Using device:', device)
 
-    from ppo_selfimitate_clip import ppo_selfimitate_clip
-    print('Training ppo_selfimitate_clip.')
-    ppo_selfimitate_clip(args,
+    # GRPO Change: Import the renamed file and function
+    from grpo_selfimitate_clip import grpo_selfimitate_clip
+    print('Training grpo_selfimitate_clip.')
+
+    # GRPO Change: Call the renamed function
+    grpo_selfimitate_clip(args,
         gamma=args.gamma, save_path=args.save_path, target_kl=args.target_kl,
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
-        logger_kwargs=logger_kwargs, device=device, 
+        logger_kwargs=logger_kwargs, device=device,
         clip_config_path=args.clip_config_path, clip_model_path=args.clip_model_path,
         agent_config_path=args.agent_config_path)
