@@ -55,8 +55,13 @@ class MineAgent(nn.Module):
         batch: Batch
     ) -> Batch:
         logits, _ = self.actor(batch.obs)
-        val = self.critic(batch.obs)
-        
+
+        # --- GRPO Change: Only call critic if it exists ---
+        val = None  # val을 None으로 초기화
+        if self.critic is not None:
+            val = self.critic(batch.obs)
+        # --------------------------------------------------
+
         if isinstance(logits, tuple):
             dist = self.dist_fn(*logits)
         else:
@@ -68,4 +73,3 @@ class MineAgent(nn.Module):
         logp = dist.log_prob(act)
 
         return Batch(logits=logits, act=act, dist=dist, logp=logp, val=val)
-
