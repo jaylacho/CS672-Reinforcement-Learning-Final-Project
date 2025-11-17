@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# PyTorch models and checkpoints (large files)
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+
+# Training outputs
+checkpoint/
+data/
+logs/
+*.log
+wget-log
+
+# Compressed files
+*.zip
+*.tar.gz
+*.tar
+*.gz
+*.rar
+*.7z
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# System files
+Thumbs.db
+.DS_Store
+
+# Large data files
+*.tar.gz
+*.whl
+
+# Java files (Minecraft Malmo source code)
+*.java
+*.pyc
+# Or specific path:
+# MCEnv/minedojo/sim/Malmo/Minecraft/src/main/java/**/*.java
+
+# MCEnv - installed package (too large, exclude)
+MCEnv/
+
+# Other experiment code directories
+dqn_code/
+train_find_lowlevel/
+minecraft/
+
+# Minecraft specific (if needed)
+# Uncomment if you don't want to include these
+# minecraft/*.pth
+# minecraft/*.zip
+# minecraft/*.tar.gz
+
