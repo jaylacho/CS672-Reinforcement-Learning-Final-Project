@@ -49,6 +49,7 @@ wget-log
 env/
 venv/
 ENV/
+wandb/
 
 # Temporary files
 *.tmp

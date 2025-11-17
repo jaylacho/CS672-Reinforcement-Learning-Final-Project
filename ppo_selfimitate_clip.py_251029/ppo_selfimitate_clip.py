@@ -12,6 +12,7 @@ import random
 from spinup_utils.logx import EpochLogger
 from PIL import Image
 import imageio
+import wandb
 #from clip_model import build_model, tokenize_batch
 #from torchvision.transforms import Resize 
 #from skimage.transform import resize
@@ -197,6 +198,13 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
     # Set up logger and save configuration
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
+    
+    # Initialize wandb
+    wandb.init(
+        project="RL-GPT",
+        name=logger_kwargs.get('exp_name', 'dpo'),
+        config=vars(args) if hasattr(args, '__dict__') else {}
+    )
 
     # Random seed
     torch.manual_seed(seed)
@@ -382,58 +390,94 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         if actual_batch_size < dpo_batch_size:
             logger.log(f'Using smaller batch size: {actual_batch_size} (requested: {dpo_batch_size}, Chosen: {imitation_buf.cur_size}, Rejected: {rejection_buf.cur_size})')
 
-        # 전체 데이터 풀 가져오기 (get()은 모든 궤적을 평탄화)
-        data_chosen = imitation_buf.get()
-        data_rejected = rejection_buf.get()
-
+        # --- 개선: reward 차이가 큰 상위 80개 조합 선택 ---
+        import itertools
+        
+        # 궤적 단위로 모든 조합 생성: (chosen_traj_idx, rejected_traj_idx) 쌍
+        n_chosen_traj = imitation_buf.cur_size
+        n_rejected_traj = rejection_buf.cur_size
+        
+        all_traj_pairs = list(itertools.product(range(n_chosen_traj), range(n_rejected_traj)))
+        total_traj_pairs = len(all_traj_pairs)
+        logger.log(f'Total trajectory pairs: {total_traj_pairs} (Chosen traj: {n_chosen_traj}, Rejected traj: {n_rejected_traj})')
+        
+        # 각 궤적 pair의 reward 차이 계산
+        reward_diffs = []
+        for chosen_idx, rejected_idx in all_traj_pairs:
+            chosen_ret = imitation_buf.ret_buf[chosen_idx]
+            rejected_ret = rejection_buf.ret_buf[rejected_idx]
+            reward_diff = chosen_ret - rejected_ret  # 차이가 클수록 좋은 pair
+            reward_diffs.append((reward_diff, chosen_idx, rejected_idx))
+        
+        # Reward 차이가 큰 순서로 정렬 (내림차순)
+        reward_diffs.sort(reverse=True, key=lambda x: x[0])
+        
+        # 상위 80개 선택 (또는 가능한 만큼)
+        num_selected = min(dpo_train_iters, total_traj_pairs)
+        selected_pairs = reward_diffs[:num_selected]
+        
+        if num_selected > 0:
+            max_diff = reward_diffs[0][0]
+            min_diff = reward_diffs[num_selected-1][0]
+            logger.log(f'Selected {num_selected} pairs with largest reward differences (max diff: {max_diff:.2f}, min diff: {min_diff:.2f})')
+        else:
+            logger.log('No pairs selected.')
+        
+        # 선택된 궤적 pair들의 모든 transition을 수집
+        chosen_traj_indices = [pair[1] for pair in selected_pairs]
+        rejected_traj_indices = [pair[2] for pair in selected_pairs]
+        
+        # 선택된 궤적들의 데이터 수집
+        selected_chosen_obs = [imitation_buf.obs_buf[i] for i in chosen_traj_indices]
+        selected_chosen_act = [imitation_buf.act_buf[i] for i in chosen_traj_indices]
+        selected_rejected_obs = [rejection_buf.obs_buf[i] for i in rejected_traj_indices]
+        selected_rejected_act = [rejection_buf.act_buf[i] for i in rejected_traj_indices]
+        
+        # 평탄화하여 transition 단위로 변환
+        if args.agent_model == 'mineagent':
+            data_chosen = {
+                'obs': Batch.cat(selected_chosen_obs),
+                'act': torch.as_tensor(np.concatenate(selected_chosen_act), dtype=torch.long)
+            }
+            data_rejected = {
+                'obs': Batch.cat(selected_rejected_obs),
+                'act': torch.as_tensor(np.concatenate(selected_rejected_act), dtype=torch.long)
+            }
+        else:
+            data_chosen = {
+                'obs': torch.as_tensor(np.concatenate(selected_chosen_obs), dtype=torch.float32),
+                'act': torch.as_tensor(np.concatenate(selected_chosen_act), dtype=torch.long)
+            }
+            data_rejected = {
+                'obs': torch.as_tensor(np.concatenate(selected_rejected_obs), dtype=torch.float32),
+                'act': torch.as_tensor(np.concatenate(selected_rejected_act), dtype=torch.long)
+            }
+        
         n_chosen = data_chosen['act'].shape[0]
         n_rejected = data_rejected['act'].shape[0]
         
-        # 실제 사용 가능한 배치 크기 재계산 (get() 후 실제 데이터 크기 기준)
+        # 실제 사용 가능한 배치 크기 재계산
         actual_batch_size = min(actual_batch_size, n_chosen, n_rejected)
         
         if n_chosen < 1 or n_rejected < 1:
-             logger.log('Not enough data in buffers after get(), skipping.')
-             # 로깅을 위해 기본값 저장
+             logger.log('Not enough data after selection, skipping.')
              logger.store(LossDPO=0.0, KL_Chosen=0.0, KL_Rejected=0.0)
              return
-
-        # --- 개선: 모든 조합 사용 (chosen * rejected) ---
-        import itertools
         
-        # 모든 조합 생성: (chosen_idx, rejected_idx) 쌍
-        all_pairs = list(itertools.product(range(n_chosen), range(n_rejected)))
-        total_pairs = len(all_pairs)
-        logger.log(f'Total preference pairs: {total_pairs} (Chosen: {n_chosen}, Rejected: {n_rejected})')
-        
-        # 조합을 랜덤 셔플 (학습 순서 다양화)
-        np.random.shuffle(all_pairs)
-        
-        # 배치로 나누어 학습
-        batch_size = min(actual_batch_size, total_pairs)  # 실제 사용할 배치 크기
-        num_batches = (total_pairs + batch_size - 1) // batch_size  # 올림 나눗셈
-        
-        logger.log(f'Training with {num_batches} batches (batch size: {batch_size})')
-        
-        for batch_idx in range(num_batches):
+        # 선택된 데이터로 학습 (80번 반복)
+        for i in range(dpo_train_iters):
             pi_optimizer.zero_grad()
             
-            # 현재 배치의 pair 인덱스
-            start_idx = batch_idx * batch_size
-            end_idx = min(start_idx + batch_size, total_pairs)
-            batch_pairs = all_pairs[start_idx:end_idx]
-            
-            # 배치 데이터 준비
-            chosen_indices = [pair[0] for pair in batch_pairs]
-            rejected_indices = [pair[1] for pair in batch_pairs]
+            # 배치 샘플링 (actual_batch_size 사용)
+            idxs_chosen = np.random.randint(0, n_chosen, size=actual_batch_size)
+            idxs_rejected = np.random.randint(0, n_rejected, size=actual_batch_size)
 
             try:
                 # (MineAgent.Batch 클래스가 인덱싱을 지원해야 함)
-                batch_chosen = {'obs': data_chosen['obs'][chosen_indices], 'act': data_chosen['act'][chosen_indices]}
-                batch_rejected = {'obs': data_rejected['obs'][rejected_indices], 'act': data_rejected['act'][rejected_indices]}
+                batch_chosen = {'obs': data_chosen['obs'][idxs_chosen], 'act': data_chosen['act'][idxs_chosen]}
+                batch_rejected = {'obs': data_rejected['obs'][idxs_rejected], 'act': data_rejected['act'][idxs_rejected]}
             except TypeError:
                 logger.log("CRITICAL ERROR: MineAgent.Batch does not support indexing (__getitem__). Update cannot proceed.")
-                # (이 오류가 발생하면 MineAgent.Batch 클래스에 __getitem__ 구현이 필수적임)
                 break
             except Exception as e:
                 logger.log(f"Error during DPO batch sampling: {e}")
@@ -653,6 +697,19 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         # --- DPO 변경 끝 ---
         logger.log_tabular('Time', time.time()-start_time)
         logger.dump_tabular()
+        
+        # Log all metrics to wandb
+        wandb_log_dict = {'epoch': epoch}
+        
+        # logger.epoch_dict에 있는 모든 값들을 wandb에 로깅
+        for key, value in logger.epoch_dict.items():
+            # 스칼라 값만 로깅 (리스트나 복잡한 객체는 제외)
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                wandb_log_dict[key] = float(value)
+            elif isinstance(value, np.ndarray) and value.size == 1:
+                wandb_log_dict[key] = float(value.item())
+        
+        wandb.log(wandb_log_dict)
 
 if __name__ == '__main__':
     # (main 함수는 변경 없음)

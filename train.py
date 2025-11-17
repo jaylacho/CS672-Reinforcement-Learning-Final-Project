@@ -71,9 +71,15 @@ if __name__ == '__main__':
     args = parser.parse_args()
     #print(args)
 
+    # Update exp_name based on algorithm if it's still the default value
+    if args.exp_name == 'ppo' and args.algorithm.lower() == 'dpo':
+        args.exp_name = 'dpo'
+    elif args.exp_name == 'ppo' and args.algorithm.lower() == 'ppo':
+        args.exp_name = 'ppo'  # Keep as is
+
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
-    args.save_path = os.path.join(args.save_path, '{}-{}-seed{}'.format(args.exp_name, args.task, args.seed))
+        args.save_path = os.path.join(args.save_path, '{}-{}-seed{}'.format(args.exp_name, args.task, args.seed))
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
 
@@ -107,9 +113,6 @@ if __name__ == '__main__':
             sys.path.insert(0, dpo_path)
         from ppo_selfimitate_clip import ppo_selfimitate_clip
         print('Training with DPO algorithm.')
-        # Update exp_name for DPO if it's still default 'ppo'
-        if 'ppo' in args.exp_name.lower() and 'dpo' not in args.exp_name.lower():
-            args.exp_name = args.exp_name.replace('ppo', 'dpo')
     else:
         # Import PPO implementation (default)
         from ppo_selfimitate_clip import ppo_selfimitate_clip
