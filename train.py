@@ -21,6 +21,9 @@ if __name__ == '__main__':
     parser.add_argument('--save-path', type=str, default='checkpoint') # save dir for model&data. Use /sharefs/baaiembodied/xxx on server
     parser.add_argument('--exp-name', type=str, default='ppo') # experiment log name
     
+    # algorithm selection
+    parser.add_argument('--algorithm', '--algo', type=str, default='ppo', choices=['ppo', 'dpo'],
+                        help='Algorithm to use: ppo or dpo')
 
     # arguments for tasks
     parser.add_argument('--task', type=str, default='harvest_milk_with_empty_bucket_and_cow') # programmatic task_id, for single task
@@ -95,8 +98,24 @@ if __name__ == '__main__':
         device = torch.device('cuda:{}'.format(args.gpu))
     print('Using device:', device)
 
-    from ppo_selfimitate_clip import ppo_selfimitate_clip
-    print('Training ppo_selfimitate_clip.')
+    # Select algorithm: PPO or DPO
+    if args.algorithm.lower() == 'dpo':
+        # Import DPO implementation
+        import sys
+        dpo_path = os.path.join(os.path.dirname(__file__), 'ppo_selfimitate_clip.py_251029')
+        if dpo_path not in sys.path:
+            sys.path.insert(0, dpo_path)
+        from ppo_selfimitate_clip import ppo_selfimitate_clip
+        print('Training with DPO algorithm.')
+        # Update exp_name for DPO if it's still default 'ppo'
+        if 'ppo' in args.exp_name.lower() and 'dpo' not in args.exp_name.lower():
+            args.exp_name = args.exp_name.replace('ppo', 'dpo')
+    else:
+        # Import PPO implementation (default)
+        from ppo_selfimitate_clip import ppo_selfimitate_clip
+        print('Training with PPO algorithm.')
+    
+    # Call the training function
     ppo_selfimitate_clip(args,
         gamma=args.gamma, save_path=args.save_path, target_kl=args.target_kl,
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
