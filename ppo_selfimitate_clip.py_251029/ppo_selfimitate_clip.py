@@ -696,19 +696,23 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         logger.log_tabular('KL_Rejected', with_min_and_max=False)
         # --- DPO 변경 끝 ---
         logger.log_tabular('Time', time.time()-start_time)
-        logger.dump_tabular()
         
-        # Log all metrics to wandb
+        # dump_tabular() 전에 log_current_row의 값을 저장 (dump_tabular() 후에는 비워짐)
         wandb_log_dict = {'epoch': epoch}
-        
-        # logger.epoch_dict에 있는 모든 값들을 wandb에 로깅
-        for key, value in logger.epoch_dict.items():
+        for key, value in logger.log_current_row.items():
             # 스칼라 값만 로깅 (리스트나 복잡한 객체는 제외)
             if isinstance(value, (int, float, np.integer, np.floating)):
                 wandb_log_dict[key] = float(value)
             elif isinstance(value, np.ndarray) and value.size == 1:
                 wandb_log_dict[key] = float(value.item())
+            elif isinstance(value, (list, tuple)) and len(value) > 0:
+                # 통계값이 튜플로 저장된 경우 (mean, std, min, max)
+                if isinstance(value[0], (int, float, np.integer, np.floating)):
+                    wandb_log_dict[key] = float(value[0])  # 평균값만 사용
         
+        logger.dump_tabular()
+        
+        # Wandb에 로깅
         wandb.log(wandb_log_dict)
 
 if __name__ == '__main__':
