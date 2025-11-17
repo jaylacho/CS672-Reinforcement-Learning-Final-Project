@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch.nn as nn
+from typing import Optional
 
 from .batch import Batch
 
@@ -10,12 +11,12 @@ class MineAgent(nn.Module):
     def __init__(
         self,
         actor: nn.Module,
-        critic: nn.Module,
+        critic: Optional[nn.Module] = None,  # DPO 지원: critic이 None일 수 있음
         deterministic_eval: bool = False, # use stochastic in both exploration and test
     ):
         super().__init__()
         self.actor = actor
-        self.critic = critic
+        self.critic = critic  # critic이 None일 수 있음
         self._deterministic_eval = deterministic_eval
         self.dist_fn = actor.dist_fn
 
@@ -55,7 +56,11 @@ class MineAgent(nn.Module):
         batch: Batch
     ) -> Batch:
         logits, _ = self.actor(batch.obs)
-        val = self.critic(batch.obs)
+        
+        # DPO 지원: critic이 None일 경우 val 계산 건너뛰기
+        val = None
+        if self.critic is not None:
+            val = self.critic(batch.obs)
         
         if isinstance(logits, tuple):
             dist = self.dist_fn(*logits)
@@ -67,5 +72,6 @@ class MineAgent(nn.Module):
             act = dist.sample()
         logp = dist.log_prob(act)
 
+        # val이 None일 수 있음 (DPO에서는 val을 사용하지 않으므로 괜찮음)
         return Batch(logits=logits, act=act, dist=dist, logp=logp, val=val)
 

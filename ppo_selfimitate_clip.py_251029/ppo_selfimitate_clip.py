@@ -367,10 +367,20 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
     def update_dpo(dpo_batch_size=128, dpo_train_iters=80):
         mine_agent.train()
         
-        # 학습할 데이터가 충분한지 확인
-        if imitation_buf.cur_size < dpo_batch_size or rejection_buf.cur_size < dpo_batch_size:
+        # 최소 배치 크기 설정 (초기 학습을 위해 최소 1개만 있어도 학습 가능)
+        min_batch_size = min(dpo_batch_size, max(1, min(imitation_buf.cur_size, rejection_buf.cur_size)))
+        
+        # 학습할 데이터가 충분한지 확인 (최소 1개씩은 있어야 함)
+        if imitation_buf.cur_size < 1 or rejection_buf.cur_size < 1:
             logger.log(f'Not enough data for DPO update, skipping. (Chosen: {imitation_buf.cur_size}, Rejected: {rejection_buf.cur_size})')
+            # 로깅을 위해 기본값 저장
+            logger.store(LossDPO=0.0, KL_Chosen=0.0, KL_Rejected=0.0)
             return
+        
+        # 실제 사용할 배치 크기 결정 (가능한 만큼 사용)
+        actual_batch_size = min(min_batch_size, imitation_buf.cur_size, rejection_buf.cur_size)
+        if actual_batch_size < dpo_batch_size:
+            logger.log(f'Using smaller batch size: {actual_batch_size} (requested: {dpo_batch_size}, Chosen: {imitation_buf.cur_size}, Rejected: {rejection_buf.cur_size})')
 
         # 전체 데이터 풀 가져오기 (get()은 모든 궤적을 평탄화)
         data_chosen = imitation_buf.get()
@@ -379,21 +389,48 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         n_chosen = data_chosen['act'].shape[0]
         n_rejected = data_rejected['act'].shape[0]
         
-        if n_chosen < dpo_batch_size or n_rejected < dpo_batch_size:
+        # 실제 사용 가능한 배치 크기 재계산 (get() 후 실제 데이터 크기 기준)
+        actual_batch_size = min(actual_batch_size, n_chosen, n_rejected)
+        
+        if n_chosen < 1 or n_rejected < 1:
              logger.log('Not enough data in buffers after get(), skipping.')
+             # 로깅을 위해 기본값 저장
+             logger.store(LossDPO=0.0, KL_Chosen=0.0, KL_Rejected=0.0)
              return
 
-        for i in range(dpo_train_iters):
+        # --- 개선: 모든 조합 사용 (chosen * rejected) ---
+        import itertools
+        
+        # 모든 조합 생성: (chosen_idx, rejected_idx) 쌍
+        all_pairs = list(itertools.product(range(n_chosen), range(n_rejected)))
+        total_pairs = len(all_pairs)
+        logger.log(f'Total preference pairs: {total_pairs} (Chosen: {n_chosen}, Rejected: {n_rejected})')
+        
+        # 조합을 랜덤 셔플 (학습 순서 다양화)
+        np.random.shuffle(all_pairs)
+        
+        # 배치로 나누어 학습
+        batch_size = min(actual_batch_size, total_pairs)  # 실제 사용할 배치 크기
+        num_batches = (total_pairs + batch_size - 1) // batch_size  # 올림 나눗셈
+        
+        logger.log(f'Training with {num_batches} batches (batch size: {batch_size})')
+        
+        for batch_idx in range(num_batches):
             pi_optimizer.zero_grad()
             
-            # 배치 샘플링
-            idxs_chosen = np.random.randint(0, n_chosen, size=dpo_batch_size)
-            idxs_rejected = np.random.randint(0, n_rejected, size=dpo_batch_size)
+            # 현재 배치의 pair 인덱스
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, total_pairs)
+            batch_pairs = all_pairs[start_idx:end_idx]
+            
+            # 배치 데이터 준비
+            chosen_indices = [pair[0] for pair in batch_pairs]
+            rejected_indices = [pair[1] for pair in batch_pairs]
 
             try:
                 # (MineAgent.Batch 클래스가 인덱싱을 지원해야 함)
-                batch_chosen = {'obs': data_chosen['obs'][idxs_chosen], 'act': data_chosen['act'][idxs_chosen]}
-                batch_rejected = {'obs': data_rejected['obs'][idxs_rejected], 'act': data_rejected['act'][idxs_rejected]}
+                batch_chosen = {'obs': data_chosen['obs'][chosen_indices], 'act': data_chosen['act'][chosen_indices]}
+                batch_rejected = {'obs': data_rejected['obs'][rejected_indices], 'act': data_rejected['act'][rejected_indices]}
             except TypeError:
                 logger.log("CRITICAL ERROR: MineAgent.Batch does not support indexing (__getitem__). Update cannot proceed.")
                 # (이 오류가 발생하면 MineAgent.Batch 클래스에 __getitem__ 구현이 필수적임)
@@ -423,6 +460,8 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
     # initialize the clip reward model
     clip_reward_model = CLIPReward(model_clip, device, [env.task_prompt])
 
+    # Set up steps per epoch for rollout
+    local_steps_per_epoch = steps_per_epoch
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
@@ -443,7 +482,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         logger.log('start epoch {}'.format(epoch))
         o, ep_ret, ep_len = env.reset(), 0, 0
         ep_rewards = [] # 스텝별 보상 (CLIP 계산 전)
-        ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,1,*env.observation_size) # CLIP 계산용
+        ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int32)).view(1,1,*env.observation_size) # CLIP 계산용
         ep_ret_clip, ep_success, ep_ret_dense = 0, 0, 0
 
         # --- DPO 변경: 궤적 임시 저장 리스트 ---
@@ -465,9 +504,10 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
             # --- DPO 변경: PPOBuffer 저장을 임시 리스트 저장으로 변경 ---
             if args.agent_model == 'mineagent':
                 batch_o = preprocess_obs(o, device)
-                ep_obs_list.append(batch_o.to_numpy()) # CPU에 저장
+                batch_o.to_numpy()  # GPU 메모리 절약을 위해 numpy로 변환 (in-place)
+                ep_obs_list.append(batch_o)  # Batch 객체 그대로 저장
             else:
-                batch_o_np = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,*obs_dim)
+                batch_o_np = torch_normalize(np.asarray(o['rgb'], dtype=np.int32)).view(1,*obs_dim)
                 batch_o = torch.as_tensor(batch_o_np, dtype=torch.float32)
                 ep_obs_list.append(batch_o_np) # CPU에 저장
             # --- DPO 변경 끝 ---
@@ -476,7 +516,8 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                 # --- DPO 변경: 가치(v) 무시 ---
                 # (MineAgent.forward_actor_critic이 critic=None일 때 val=None 반환 가정)
                 if args.agent_model == 'mineagent':
-                    batch_o_input = batch_o.to_torch(device=device)
+                    batch_o.to_torch(device=device)  # in-place 변환
+                    batch_o_input = batch_o  # 변환된 batch_o 사용
                 else:
                     batch_o_input = batch_o.to(device)
                     
@@ -496,7 +537,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
             r = r * args.reward_success + args.reward_step
             ep_rewards.append(r)
             ep_obs = torch.cat((ep_obs, 
-                torch_normalize(np.asarray(next_o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)), 1)
+                torch_normalize(np.asarray(next_o['rgb'], dtype=np.int32)).view(1,1,*env.observation_size)), 1)
 
             if args.use_dense:
                 r_dense = next_o['dense_reward']
@@ -569,7 +610,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                 # 리셋
                 o, ep_ret, ep_len = env.reset(), 0, 0
                 ep_rewards = []
-                ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)
+                ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int32)).view(1,1,*env.observation_size)
                 ep_ret_clip, ep_success, ep_ret_dense = 0, 0, 0
                 
                 # 임시 리스트 비우기
