@@ -39,7 +39,7 @@ class PPOBuffer:
             self.obs_buf = [Batch() for i in range(size)]#np.zeros(utils.combined_shape(size, obs_dim), dtype=np.float32)
         else:
             self.obs_buf = np.zeros(utils.combined_shape(size, obs_dim), dtype=np.float32)
-        self.act_buf = np.zeros(utils.combined_shape(size, act_dim), dtype=np.int)
+        self.act_buf = np.zeros(utils.combined_shape(size, act_dim), dtype=np.int64)
         #self.act2_buf = np.zeros(utils.combined_shape(size, act2_dim), dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
@@ -657,7 +657,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                 if args.agent_model == 'mineagent':
                     batch = preprocess_obs(obs, device)
                 else:
-                    batch = torch_normalize(np.asarray(obs['rgb'], dtype=np.int)).view(1,*obs_dim)
+                    batch = torch_normalize(np.asarray(obs['rgb'], dtype=np.int32)).view(1,*obs_dim)
                     batch = torch.as_tensor(batch, dtype=torch.float32).to(device)
                 with torch.no_grad():
                     act = mine_agent(batch).act
@@ -681,7 +681,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
         o, ep_ret, ep_len = env.reset(), 0, 0 # Prepare for interaction with environment
         #clip_reward_model.update_obs(o['rgb_emb']) # preprocess the images embedding
         ep_rewards = []
-        ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)
+        ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int32)).view(1,1,*env.observation_size)
         ep_ret_clip, ep_success, ep_ret_dense = 0, 0, 0
         rgb_list = []
         episode_in_epoch_cnt = 0 # episode id in this epoch
@@ -696,7 +696,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
             if args.agent_model == 'mineagent':
                 batch_o = preprocess_obs(o, device)
             else:
-                batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,*obs_dim)
+                batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int32)).view(1,*obs_dim)
                 batch_o = torch.as_tensor(batch_o, dtype=torch.float32).to(device)
 
             with torch.no_grad():
@@ -717,7 +717,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
             r = r * args.reward_success + args.reward_step # + r_clip * args.reward_clip # weighted sum of different rewards
             ep_rewards.append(r)
             ep_obs = torch.cat((ep_obs, 
-                torch_normalize(np.asarray(next_o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)), 1)
+                torch_normalize(np.asarray(next_o['rgb'], dtype=np.int32)).view(1,1,*env.observation_size)), 1)
 
             # dense reward
             if args.use_dense:
@@ -791,7 +791,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                     if args.agent_model == 'mineagent':
                         batch_o = preprocess_obs(o, device)
                     else:
-                        batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,*obs_dim)
+                        batch_o = torch_normalize(np.asarray(o['rgb'], dtype=np.int32)).view(1,*obs_dim)
                         batch_o = torch.as_tensor(batch_o, dtype=torch.float32).to(device)
                     with torch.no_grad():
                         v = mine_agent.forward_actor_critic(batch_o).val
@@ -807,7 +807,7 @@ def ppo_selfimitate_clip(args, seed=0, device=None,
                 o, ep_ret, ep_len = env.reset(), 0, 0
                 ep_ret_clip, ep_success, ep_ret_dense = 0, 0, 0
                 ep_rewards = []
-                ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int)).view(1,1,*env.observation_size)
+                ep_obs = torch_normalize(np.asarray(o['rgb'], dtype=np.int32)).view(1,1,*env.observation_size)
                 #clip_reward_model.reset() # don't forget to reset the clip images buffer
                 #clip_reward_model.update_obs(o['rgb_emb']) # preprocess the images embedding
                 rgb_list = []

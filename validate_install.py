@@ -7,6 +7,7 @@ if __name__ == "__main__":
         image_size=(288, 512),
         world_seed=123,
         seed=42,
+        event_level_control=True,
     )
 
     print(f"[INFO] Create a task with prompt: {env.task_prompt}")

@@ -3,6 +3,7 @@ import sys
 #import imageio
 import numpy as np
 import time
+import gym
 
 # reset() bug fixed
 # use the multi-discrete action space (3,3,4,25,25,8). For the last dim, allow 0,1,3 only
@@ -22,7 +23,7 @@ def preprocess_obs(obs, device):
     B = 1
 
     def cvt_voxels(vox):
-        ret = np.zeros(3*3*3, dtype=np.long)
+        ret = np.zeros(3*3*3, dtype=np.int64)
         for i, v in enumerate(vox.reshape(3*3*3)):
             if v in VOXEL_BLOCK_NAME_MAP:
                 ret[i] = VOXEL_BLOCK_NAME_MAP[v]
@@ -252,7 +253,7 @@ class MinecraftEnv:
 
         if self.clip_model is not None:
             with torch.no_grad():
-                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int)).view(1,1,*self.observation_size)
+                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int32)).view(1,1,*self.observation_size)
                 img_emb = self.clip_model.image_encoder(torch.as_tensor(img,dtype=torch.float).to(self.device))
                 obs['rgb_emb'] = img_emb.cpu().numpy() # (1,1,512)
                 #print(obs['rgb_emb'])
@@ -278,7 +279,7 @@ class MinecraftEnv:
         
         if self.clip_model is not None:
             with torch.no_grad():
-                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int)).view(1,1,*self.observation_size)
+                img = torch_normalize(np.asarray(obs['rgb'], dtype=np.int32)).view(1,1,*self.observation_size)
                 img_emb = self.clip_model.image_encoder(torch.as_tensor(img,dtype=torch.float).to(self.device))
                 obs['rgb_emb'] = img_emb.cpu().numpy() # (1,1,512)
                 #print(obs['rgb_emb'])
@@ -315,7 +316,14 @@ class MinecraftEnv:
 
 
 
-import habitat
+# Try importing habitat-lab, fallback to gym.Env if not available
+try:
+    import habitat
+    _HABITAT_AVAILABLE = True
+except ImportError:
+    import gym
+    _HABITAT_AVAILABLE = False
+
 '''
 Oct 29
 env for multi-process
@@ -323,7 +331,7 @@ env for multi-process
 2. not contain CLIP model
 3. specially: auto reset an env if done, because all the envs are stepped simultaneously
 '''
-class MinecraftEnvMP(habitat.RLEnv):
+class MinecraftEnvMP(gym.Env if not _HABITAT_AVAILABLE else habitat.RLEnv):
 
     # def __init__(self, task_id, image_size=(160, 256), max_step=500, clip_model=None, device=None, seed=0,
     #              dense_reward=False, target_name='cow'):
