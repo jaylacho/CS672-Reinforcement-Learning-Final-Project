@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import time
 import copy # deepcopy for task specs is generally safer for minedojo
-
+import gym
 # reset() bug fixed
 # use the multi-discrete action space (3,3,4,25,25,8). For the last dim, allow 0,1,3 only
 # further tune and clip the action space, modify transform_action(). 22/9/1
@@ -19,60 +19,76 @@ MAX_RETRIES = 3 # 환경 재시작 최대 시도 횟수
 
 def preprocess_obs(obs, device):
     """
-    Here you preprocess the raw env obs to pass to the agent.
-    Preprocessing includes, for example, use MineCLIP to extract image feature and prompt feature,
-    flatten and embed voxel names, mask unused obs, etc.
+    NumPy에서 모든 연산 및 차원 처리를 완료한 후 Tensor로 변환합니다.
     """
     B = 1
 
+    # 1. Voxels 처리 (NumPy 연산 유지)
     def cvt_voxels(vox):
         ret = np.zeros(3*3*3, dtype=np.int64)
+        # vox는 이미 numpy array일 가능성이 큽니다.
         for i, v in enumerate(vox.reshape(3*3*3)):
             if v in VOXEL_BLOCK_NAME_MAP:
                 ret[i] = VOXEL_BLOCK_NAME_MAP[v]
         return ret
 
-    # I consider the move and functional action only, because the camera space is too large?
-    # construct a 3*3*4*3 action embedding
+    # 2. Action Embedding 처리 (Python/NumPy 스칼라 연산)
     def cvt_action(act):
-        if act[5]<=1:
+        # act는 numpy array라고 가정
+        if act[5] <= 1:
             return act[0] + 3*act[1] + 9*act[2] + 36*act[5]
-        elif act[5]==3:
+        elif act[5] == 3:
             return act[0] + 3*act[1] + 9*act[2] + 72
         else:
             raise Exception('Action[5] should be 0,1,3')
 
-    # [수정됨] PyTorch 연산으로 compass 값을 직접 계산
-    # 1. yaw와 pitch 값을 float32 텐서로 직접 생성
-    angles_deg = torch.tensor(
-        [obs["location_stats"]["yaw"], obs["location_stats"]["pitch"]],
-        dtype=torch.float32,
-        device=device
-    )
-    # 2. 라디안으로 변환
-    angles_rad = torch.deg2rad(angles_deg)
-    # 3. cos, sin 값 계산 (벡터화 연산)
-    cos_vals = torch.cos(angles_rad) # [cos(yaw), cos(pitch)]
-    sin_vals = torch.sin(angles_rad) # [sin(yaw), sin(pitch)]
+    # --- NumPy Optimization Start ---
 
-    # 4. [cos(yaw), sin(yaw), cos(pitch), sin(pitch)] 순서로 결합
-    compass_tensor = torch.stack((cos_vals, sin_vals), dim=1).flatten().unsqueeze(0)
+    # [수정됨] Compass 계산: PyTorch 연산 제거 -> NumPy 벡터 연산으로 대체
+    # (1) 데이터 추출
+    yaw = obs["location_stats"]["yaw"]
+    pitch = obs["location_stats"]["pitch"]
 
+    # (2) 각도 계산 (deg -> rad) 및 삼각함수 계산 (NumPy)
+    # shape: (2,) -> [yaw, pitch]
+    angles_rad = np.deg2rad(np.array([yaw, pitch], dtype=np.float32))
+
+    cos_vals = np.cos(angles_rad) # [cos(yaw), cos(pitch)]
+    sin_vals = np.sin(angles_rad) # [sin(yaw), sin(pitch)]
+
+    # (3) 결합: [cos(yaw), sin(yaw), cos(pitch), sin(pitch)]
+    # axis=1 stack 후 flatten -> shape: (4,) -> reshape (1, 4)
+    compass_np = np.stack([cos_vals, sin_vals], axis=1).flatten().reshape(1, -1)
+
+    # 나머지 데이터들도 NumPy 상태에서 차원(Batch)을 맞춰줍니다.
+    gps_np = np.array([obs["location_stats"]["pos"]], dtype=np.float32) # Shape: (1, 3)
+
+    # Voxels
+    voxels_raw = cvt_voxels(obs["voxels"]["block_name"])
+    voxels_np = voxels_raw.reshape(1, -1) # Shape: (1, 27)
+
+    # Biome ID
+    biome_np = np.array([int(obs["location_stats"]["biome_id"])], dtype=np.int64) # Shape: (1,)
+
+    # Prev Action
+    prev_action_val = cvt_action(obs["prev_action"])
+    prev_action_np = np.array([prev_action_val], dtype=np.int64) # Shape: (1,)
+
+    # Prompt (Image Embedding)
+    # obs["rgb_emb"]가 이미 numpy array라고 가정 (MineCLIP에서 .cpu().numpy()로 변환되어 들어옴)
+    prompt_np = obs["rgb_emb"].reshape(B, 512)
+
+    # --- Final Tensor Conversion (GPU Upload) ---
+    # 여기서 한 번만 Tensor로 변환하여 Device로 보냅니다.
     obs_ = {
-        "compass": compass_tensor, # [수정됨] 계산된 텐서 사용
-        "gps": torch.as_tensor([obs["location_stats"]["pos"]], device=device),
-        "voxels": torch.as_tensor(
-            [cvt_voxels(obs["voxels"]["block_name"])], dtype=torch.int64, device=device
-        ),
-        "biome_id": torch.tensor(
-            [int(obs["location_stats"]["biome_id"])], dtype=torch.int64, device=device
-        ),
-        "prev_action": torch.tensor(
-            [cvt_action(obs["prev_action"])], dtype=torch.int64, device=device
-        ),
-        "prompt": torch.as_tensor(obs["rgb_emb"], device=device).view(B, 512),
-        # this is actually the image embedding, not prompt embedding (for single task)
+        "compass": torch.as_tensor(compass_np, device=device),
+        "gps": torch.as_tensor(gps_np, device=device),
+        "voxels": torch.as_tensor(voxels_np, dtype=torch.long, device=device),
+        "biome_id": torch.as_tensor(biome_np, dtype=torch.long, device=device),
+        "prev_action": torch.as_tensor(prev_action_np, dtype=torch.long, device=device),
+        "prompt": torch.as_tensor(prompt_np, device=device),
     }
+
     return Batch(obs=obs_)
 
 
@@ -165,8 +181,8 @@ class MinecraftEnv:
                     seed=self.seed,
                     specified_biome=self.biome,
                     fast_reset=True,
-                    fast_reset_random_teleport_range_low=0,
-                    fast_reset_random_teleport_range_high=100,
+                    #fast_reset_random_teleport_range_low=0,
+                    #fast_reset_random_teleport_range_high=100,
                     **self.kwargs)
             else:
                 self.base_env = minedojo.make(
@@ -180,8 +196,8 @@ class MinecraftEnv:
                     for pitch in np.arange(-30, 30, 6)
                     for yaw in np.arange(-60, 60, 10)],
                     fast_reset=True,
-                    fast_reset_random_teleport_range_low=0,
-                    fast_reset_random_teleport_range_high=100,
+                    #fast_reset_random_teleport_range_low=0,
+                    #fast_reset_random_teleport_range_high=100,
                     **self.kwargs)
             self._first_reset = True
             print('--- Environment remake successful. ---')
