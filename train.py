@@ -10,7 +10,7 @@ import torch
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    # basic arguments for PPO
+    # basic arguments
     parser.add_argument('--gamma', type=float, default=0.99) # discount
     parser.add_argument('--target-kl', type=float, default=0.5) # kl upper bound for updating policy
     parser.add_argument('--seed', '-s', type=int, default=7) # random seed for both np, torch and env
@@ -22,8 +22,11 @@ if __name__ == '__main__':
     parser.add_argument('--exp-name', type=str, default='ppo') # experiment log name
     
     # algorithm selection
-    parser.add_argument('--algorithm', '--algo', type=str, default='ppo', choices=['ppo', 'dpo'],
-                        help='Algorithm to use: ppo or dpo')
+    parser.add_argument('--algorithm', '--algo', type=str, default='ppo', choices=['ppo', 'dpo', 'grpo'],
+                        help='Algorithm to use: ppo, dpo and gpro')
+    # Pretrained model arguments
+    parser.add_argument('--pretrained-model-path', type=str, default=None,
+                        help='Path to pretrained agent model checkpoint (for PPO/DPO training)')
 
     # arguments for tasks
     parser.add_argument('--task', type=str, default='harvest_milk_with_empty_bucket_and_cow') # programmatic task_id, for single task
@@ -38,7 +41,7 @@ if __name__ == '__main__':
     parser.add_argument('--agent-model', type=str, default='mineagent') # agent architecture: mineagent, cnn
     parser.add_argument('--agent-config-path', type=str, default='mineagent/conf.yaml') # for mineagent
     parser.add_argument('--actor-out-dim', type=int, nargs='+', default=[12,3])
-    ''' 
+    '''
     actor output dimensions. mineagent official: [3,3,4,25,25,8]; my initial implement: [56,3]
     mineagent with clipped camera space: [3,3,4,5,3] or [12,3]
     should modify transform_action() in minecraft.py together with this arg
@@ -51,6 +54,12 @@ if __name__ == '__main__':
     parser.add_argument('--reward-step', type=float, default=-1.) # per-step penalty
     parser.add_argument('--use-dense', type=int, default=0) # use dense reward
     parser.add_argument('--reward-dense', type=float, default=1.) # dense reward weight
+    parser.add_argument('--noise-start-std', type=float, default=0.0,
+                        help='Initial std for input noise scheduling (GRPO)')
+    parser.add_argument('--noise-end-std', type=float, default=0.0,
+                        help='Final std for input noise scheduling (GRPO)')
+    parser.add_argument('--noise-decay-epochs', type=int, default=0,
+                        help='Epochs over which to decay noise std (GRPO)')
 
     # self-imitation learning
     parser.add_argument('--imitate-buf-size', type=int, default=500) # max num of traj to store
@@ -72,14 +81,12 @@ if __name__ == '__main__':
     #print(args)
 
     # Update exp_name based on algorithm if it's still the default value
-    if args.exp_name == 'ppo' and args.algorithm.lower() == 'dpo':
-        args.exp_name = 'dpo'
-    elif args.exp_name == 'ppo' and args.algorithm.lower() == 'ppo':
-        args.exp_name = 'ppo'  # Keep as is
+    if args.exp_name == 'ppo':
+        args.exp_name = args.algorithm.lower()
 
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
-        args.save_path = os.path.join(args.save_path, '{}-{}-seed{}'.format(args.exp_name, args.task, args.seed))
+    args.save_path = os.path.join(args.save_path, '{}-{}-seed{}'.format(args.exp_name, args.task, args.seed))
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
 
@@ -103,23 +110,22 @@ if __name__ == '__main__':
     else:
         device = torch.device('cuda:{}'.format(args.gpu))
     print('Using device:', device)
-
-    # Select algorithm: PPO or DPO
-    if args.algorithm.lower() == 'dpo':
-        # Import DPO implementation
-        import sys
-        dpo_path = os.path.join(os.path.dirname(__file__), 'ppo_selfimitate_clip.py_251029')
-        if dpo_path not in sys.path:
-            sys.path.insert(0, dpo_path)
-        from ppo_selfimitate_clip import ppo_selfimitate_clip
-        print('Training with DPO algorithm.')
+    
+    algo = args.algorithm.lower()
+    if algo == 'grpo':
+        from grpo_selfimitate_clip import grpo_selfimitate_clip
+        print('Training with GRPO algorithm.')
+        train_fn = grpo_selfimitate_clip
     else:
         # Import PPO implementation (default)
         from ppo_selfimitate_clip import ppo_selfimitate_clip
         print('Training with PPO algorithm.')
+        train_fn = ppo_selfimitate_clip
     
     # Call the training function
-    ppo_selfimitate_clip(args,
+    # If SFT was run, the model will be loaded from sft_model_path in ppo_selfimitate_clip
+    # If pretrained_model_path is provided, it will be loaded instead
+    train_fn(args,
         gamma=args.gamma, save_path=args.save_path, target_kl=args.target_kl,
         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
         logger_kwargs=logger_kwargs, device=device, 
