@@ -1,13 +1,104 @@
 import argparse
-#from spinup_utils.mpi_tools import mpi_fork
+import os
+import sys # sys와 os는 keep_active.py 생성에 필요
+import torch
+import time # keep_active.py 생성에 필요
+
+# from spinup_utils.mpi_tools import mpi_fork # 주석 처리됨
 import gym
 import utils
-import os
 from spinup_utils.run_utils import setup_logger_kwargs
-#from minecraft import MinecraftEnv
-import torch
+# from minecraft import MinecraftEnv # 주석 처리됨
+
+# =========================================================================
+# 1. [기능 추가] Kaggle 세션 유지 스크립트 생성 함수 정의
+# =========================================================================
+
+def create_keep_active_script():
+    """pyautogui 기반의 keep_active.py 파일을 현재 디렉토리에 생성합니다."""
+    
+    file_name = "keep_active.py"
+    
+    script_content = """
+import pyautogui
+import time
+import sys
+import os
+
+# --- 스크립트 실행 전 주의사항 ---
+# 이 스크립트는 로컬 PC에서 실행되어야 합니다.
+# 실행 중에는 마우스와 키보드를 제어합니다. 중지를 원하시면 터미널에서 Ctrl+C를 누르세요.
+
+def main():
+    # 실행 준비 메시지 (로컬 PC의 터미널에 출력됨)
+    print("---------------------------------------------------------")
+    print("✅ Kaggle 세션 유지 스크립트가 시작되었습니다.")
+    print("   스크립트 종료를 원하시면 터미널 창에 Ctrl+C를 누르세요.")
+    print("---------------------------------------------------------")
+    time.sleep(3) # 실행 전 3초 대기 시간 부여
+
+    try:
+        while True:
+            pyautogui.typewrite("A")
+            x, y = pyautogui.position()
+            
+            pyautogui.moveTo(x, y - 3, duration=0.2)
+            time.sleep(0.2)
+            
+            pyautogui.moveTo(x, y + 3, duration=0.2)
+            time.sleep(0.2)
+            
+            pyautogui.moveTo(x, y, duration=0.2)
+            time.sleep(0.2)
+
+            time.sleep(1.2)
+            
+    except KeyboardInterrupt:
+        print("\\n---------------------------------------------------------")
+        print("🛑 스크립트가 사용자 명령(Ctrl+C)으로 중지되었습니다. 🛑")
+        print("---------------------------------------------------------")
+    except pyautogui.FailSafeException:
+        print("\\n🛑 Fail-safe triggered: 마우스가 화면 구석으로 이동하여 스크립트가 종료되었습니다. 🛑")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\\n🛑 예상치 못한 오류 발생: {e} 🛑")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    if os.name == 'nt':
+        os.system("title Kaggle Keep Active")
+    else:
+        sys.stdout.write('\\33]0;Kaggle Keep Active\\a')
+        sys.stdout.flush()
+
+    main()
+"""
+
+    try:
+        with open(file_name, "w", encoding="utf-8") as f:
+            f.write(script_content)
+            
+        print("\n\n#########################################################")
+        print(f"✅ 세션 유지 스크립트 생성 완료: '{file_name}' 저장됨.")
+        print("   -> 훈련 중 세션이 끊기지 않도록, 이 파일을 다운로드하여")
+        print("      로컬 PC 터미널에서 실행하십시오!")
+        print(f"   -> 실행 명령 (Linux/macOS): python {file_name} &")
+        print("#########################################################\n")
+            
+    except Exception as e:
+        print(f"\n❌ 파일 생성 중 오류가 발생했습니다: {e}")
+
+
+# =========================================================================
+# 2. train.py 메인 로직 시작
+# =========================================================================
 
 if __name__ == '__main__':
+    # ----------------------------------------------------
+    # [통합] 세션 유지 스크립트 파일 생성
+    create_keep_active_script()
+    # ----------------------------------------------------
+
     parser = argparse.ArgumentParser()
 
     # basic arguments
@@ -70,6 +161,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     #print(args)
 
+    # --- 기존 train.py 파일/디렉토리 생성 로직 ---
+    
     if not os.path.exists(args.save_path):
         os.mkdir(args.save_path)
     args.save_path = os.path.join(args.save_path, '{}-{}-seed{}'.format(args.exp_name, args.task, args.seed))
@@ -86,7 +179,7 @@ if __name__ == '__main__':
     if not os.path.exists(pth):
         os.mkdir(pth)
 
-    #mpi_fork(args.cpu)  # run parallel code with mpi
+    # mpi_fork(args.cpu) # run parallel code with mpi
     args.exp_name = args.exp_name + '_' + args.task
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
