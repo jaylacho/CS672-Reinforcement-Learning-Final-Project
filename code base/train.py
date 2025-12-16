@@ -12,7 +12,7 @@ if __name__ == '__main__':
 
     # basic arguments
     parser.add_argument('--gamma', type=float, default=0.99) # discount
-    parser.add_argument('--target-kl', type=float, default=0.5) # kl upper bound for updating policy
+    parser.add_argument('--target-kl', type=float, default=0.3) # kl upper bound for updating policy
     parser.add_argument('--seed', '-s', type=int, default=7) # random seed for both np, torch and env
     parser.add_argument('--cpu', type=int, default=1) # number of workers, should be 1
     parser.add_argument('--gpu', default='0') # -1 if use cpu, otherwise select the gpu id
