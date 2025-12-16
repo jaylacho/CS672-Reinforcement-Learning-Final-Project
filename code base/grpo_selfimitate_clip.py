@@ -200,7 +200,7 @@ class CLIPReward:
 
 
 def grpo_selfimitate_clip(args, seed=0, device=None,
-        steps_per_epoch=400, epochs=500, gamma=0.99, clip_ratio=0.2, pi_lr=1e-5,
+        steps_per_epoch=400, epochs=500, gamma=0.99, clip_ratio=0.2, pi_lr=3e-5,
         train_pi_iters=80, max_ep_len=1000,
         target_kl=0.01, save_freq=5, logger_kwargs=dict(), save_path='checkpoint',
         clip_config_path='', clip_model_path='', agent_config_path=''):
